@@ -14,7 +14,7 @@ def main():
 
     try:
         # 开始以2倍速循环播放
-        process = play_bag(bag_path, speed=3.0)
+        process = play_bag(bag_path, speed=2.0)
         
         # 使脚本运行直到被外部中断
         while True:

@@ -155,7 +155,7 @@ void PCLMatcher::icp_run()
         {
             // 累加变换矩阵
             Eigen::Matrix4f final_transform;
-            icpFunction(readyICP_cloud, field_cloud, 1e-10, 1, 0.001, 35, true, icp_cloud, final_transform);
+            icpFunction(readyICP_cloud, field_cloud, 1e-10, 1, 0.001, 50, true, icp_cloud, final_transform);
             initial_alignment_transform = final_transform * initial_alignment_transform;
 
             std::cout << "icp_run Initial alignment transform matrix:" << std::endl;
@@ -177,14 +177,56 @@ void PCLMatcher::icp_run()
     }
 }
 
-void PCLMatcher::mergePointClouds() {
+void PCLMatcher::upsampleVoxelGrid(pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, float leaf_size, int points_per_voxel) 
+{
+    auto start_time = std::chrono::high_resolution_clock::now();
+    pcl::PointCloud<pcl::PointXYZ>::Ptr downsampled(new pcl::PointCloud<pcl::PointXYZ>());
+    pcl::VoxelGrid<pcl::PointXYZ> vg;
+    vg.setInputCloud(cloud);
+    vg.setLeafSize(leaf_size, leaf_size, leaf_size);
+    vg.filter(*downsampled);
+
+    std::default_random_engine generator;
+    std::uniform_real_distribution<float> distribution(-leaf_size / 2, leaf_size / 2);
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr upsampled(new pcl::PointCloud<pcl::PointXYZ>());
+
+    // 对每个体素的中心点进行多次复制和随机偏移，但只有当点的 x 坐标大于 15m 时
+    for (const auto& point : downsampled->points) {
+        if (point.x > 15.0) { // 只有当 x 坐标大于 15 米时，才进行上采样
+            for (int i = 0; i < points_per_voxel; ++i) {
+                pcl::PointXYZ new_point;
+                new_point.x = point.x + distribution(generator);
+                new_point.y = point.y + distribution(generator);
+                new_point.z = point.z + distribution(generator);
+                upsampled->push_back(new_point);
+            }
+        } else {
+            for (int i = 0; i < points_per_voxel / 2; ++i) {
+                pcl::PointXYZ new_point;
+                new_point.x = point.x + distribution(generator);
+                new_point.y = point.y + distribution(generator);
+                new_point.z = point.z + distribution(generator);
+                upsampled->push_back(new_point);
+            }
+        }
+    }
+
+    cloud.swap(upsampled); // 更新原始点云
+    auto end_time = std::chrono::high_resolution_clock::now();
+    // 计算并打印上采样耗时（毫秒）
+    auto duration_ms = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count() / 1000;
+    std::cout << "upsampleVoxelGrid: " << duration_ms << " ms" << std::endl;
+}
+
+
+void PCLMatcher::mergePointClouds(std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr>& plb, pcl::PointCloud<pcl::PointXYZ>::Ptr& pl) {
     pcl::PointCloud<pcl::PointXYZ>::Ptr merged_cloud(new pcl::PointCloud<pcl::PointXYZ>());
-    for (auto &cloud : cloud_buffer) {
+    for (auto &cloud : plb) {
         *merged_cloud += *cloud; // 合并所有点云
     }
     // 更新current_source为合并后的点云
-    readyICP_cloud = merged_cloud;
-    isreadyICP = true;
+    pl = merged_cloud;
 }
 
 void PCLMatcher::removeOverlappingPoints(pcl::PointCloud<pcl::PointXYZ>::Ptr& live_cloud, pcl::PointCloud<pcl::PointXYZ>::Ptr& field_cloud)
@@ -193,7 +235,7 @@ void PCLMatcher::removeOverlappingPoints(pcl::PointCloud<pcl::PointXYZ>::Ptr& li
     pcl::SegmentDifferences<pcl::PointXYZ> segment;
     segment.setInputCloud(live_cloud);
     segment.setTargetCloud(field_cloud);
-    segment.setDistanceThreshold(0.05);  // 可根据实际情况调整
+    segment.setDistanceThreshold(0.1);  // 可根据实际情况调整
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr dynamic_obstacles(new pcl::PointCloud<pcl::PointXYZ>());
     segment.segment(*dynamic_obstacles);
@@ -202,7 +244,7 @@ void PCLMatcher::removeOverlappingPoints(pcl::PointCloud<pcl::PointXYZ>::Ptr& li
     pcl::PassThrough<pcl::PointXYZ> pass_y;
     pass_y.setInputCloud(dynamic_obstacles);
     pass_y.setFilterFieldName("y");
-    pass_y.setFilterLimits(0.2, 14.8);
+    pass_y.setFilterLimits(-15, -0.6);
     pass_y.filter(*dynamic_obstacles);
 
     // 在x轴上设置滤波范围
@@ -216,18 +258,14 @@ void PCLMatcher::removeOverlappingPoints(pcl::PointCloud<pcl::PointXYZ>::Ptr& li
     pcl::PassThrough<pcl::PointXYZ> pass_z;
     pass_z.setInputCloud(dynamic_obstacles);
     pass_z.setFilterFieldName("z");
-    pass_z.setFilterLimits(0.0, 1.5);
+    pass_z.setFilterLimits(0.0, 1.4);
     pass_z.filter(*dynamic_obstacles);
 
     // 累加点云
-    pcl::PointCloud<pcl::PointXYZ>::Ptr accumulated_obstacle_cloud(new pcl::PointCloud<pcl::PointXYZ>());
-    for (int i = 0; i < 10; ++i) 
-    {
-        *accumulated_obstacle_cloud += *dynamic_obstacles;
-    }
+    // upsampleVoxelGrid(dynamic_obstacles, 0.1, 1000); // 每个体素中生成10个点
     
     sensor_msgs::PointCloud2 ros_dynamic_obstacles;
-    pcl::toROSMsg(*accumulated_obstacle_cloud, ros_dynamic_obstacles);
+    pcl::toROSMsg(*dynamic_obstacles, ros_dynamic_obstacles);
     ros_dynamic_obstacles.header.frame_id = "livox_frame";
     ros_dynamic_obstacles.header.stamp = ros::Time::now();
     obstaclecloud_pub.publish(ros_dynamic_obstacles);
@@ -333,19 +371,21 @@ void PCLMatcher::cloudCallback(const sensor_msgs::PointCloud2ConstPtr& input_clo
         // std::cout << "cloudCallback Initial alignment transform matrix:" << std::endl;
         // std::cout << initial_alignment_transform.matrix() << std::endl;
 
-        if (cloud_buffer.size() <= 20) 
+        if (cloud_buffer.size() < 20) 
         {
-            // std::cout<<"cloud_buffer.size()"<<cloud_buffer.size()<<std::endl;
+            std::cout<<"cloud_buffer.size()"<<cloud_buffer.size()<<std::endl;
             cloud_buffer.push_back(source_cloud);
-            if(cloud_buffer.size() == 20)
+            if(cloud_buffer.size() == 19)
             {
-                mergePointClouds(); // 合并点云
+                mergePointClouds(cloud_buffer, readyICP_cloud); // 合并点云
+                isreadyICP = true;
             }
         }
     }
 
     if(isICPFinish)
     {
+        //单帧
         removeOverlappingPoints(source_cloud, field_cloud);
     }
 }
@@ -355,7 +395,7 @@ int main(int argc, char** argv) {
     ros::init(argc, argv, "pcl_matcher_node");
     ros::NodeHandle nh;
     PCLMatcher matcher(nh);
-    std::string pcd_file_path = "/home/hlc/code/RM_Radar2024/pclmatcher/file/pcd/HIT/RMUC2024_v2.pcd";
+    std::string pcd_file_path = "/home/hlc/code/RM_Radar2024/pclmatcher/file/pcd/HIT/RM2024v6.pcd";
     matcher.loadPCD(pcd_file_path);
     ros::spin();
     return 0;

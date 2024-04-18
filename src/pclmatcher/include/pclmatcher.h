@@ -26,9 +26,9 @@
 #include <pcl/ModelCoefficients.h>
 #include <pcl/filters/extract_indices.h>
 #include <pcl/segmentation/sac_segmentation.h>
+#include <pcl/surface/mls.h>
 #include <chrono>
 #include "mycsf.h"
-
 
 class PCLMatcher {
 public:
@@ -52,7 +52,6 @@ private:
     ros::Subscriber cloud_sub;
     ros::Publisher field_pub;  // 发布加载的 PCD 点云
     pcl::PointCloud<pcl::PointXYZ>::Ptr field_cloud;
-    // pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
 
     sensor_msgs::PointCloud2 ros_field_cloud;
     pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_cloud;  // 过滤后的点云
@@ -79,7 +78,7 @@ private:
     const double fitness_score_threshold = 0.01; // 设置适应度得分阈值
 
     std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> cloud_buffer; // 用于存储点云的缓存
-    void mergePointClouds(); // 合并点云的函数
+    void mergePointClouds(std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr>& plb, pcl::PointCloud<pcl::PointXYZ>::Ptr& pl); // 合并点云的函数
 
     std::vector<Eigen::Vector3f> map_feature_points; // 先验地图的特征点
     std::vector<Eigen::Vector3f> sensor_feature_points; // 传感器的特征点
@@ -90,6 +89,8 @@ private:
     ros::Publisher obstaclecloud_pub;
 
     ClothSimulationFilter csf;
+
+    void upsampleVoxelGrid(pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, float leaf_size, int points_per_voxel);
 
 };
 
