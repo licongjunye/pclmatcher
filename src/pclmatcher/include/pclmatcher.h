@@ -7,6 +7,7 @@
 #include <pcl/point_types.h>
 #include <pcl/io/pcd_io.h>
 #include <pcl/registration/icp.h>
+#include <pcl/registration/ndt.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <sstream>
 #include <pcl/filters/passthrough.h>
@@ -22,7 +23,11 @@
 #include <pcl/surface/concave_hull.h>
 #include <pcl/filters/approximate_voxel_grid.h>
 #include <pcl/segmentation/segment_differences.h>
-
+#include <pcl/ModelCoefficients.h>
+#include <pcl/filters/extract_indices.h>
+#include <pcl/segmentation/sac_segmentation.h>
+#include <chrono>
+#include "mycsf.h"
 
 
 class PCLMatcher {
@@ -38,6 +43,7 @@ public:
     void computeInitialAlignment();
     void clickedPointCallback(const geometry_msgs::PointStamped::ConstPtr& msg);
     void removeOverlappingPoints(pcl::PointCloud<pcl::PointXYZ>::Ptr& live_cloud, pcl::PointCloud<pcl::PointXYZ>::Ptr& field_cloud);
+    void icpFunction(pcl::PointCloud<pcl::PointXYZ>::Ptr& sourcecloud, pcl::PointCloud<pcl::PointXYZ>::Ptr& targetcloud, float transformationEpsilon, float distance, float euclideanFitnessEpsilon, int maximumIterations, bool useReciprocalCorrespondences, pcl::PointCloud<pcl::PointXYZ>::Ptr& aligncloud, Eigen::Matrix4f& final_transform);
 
 
 
@@ -45,18 +51,21 @@ private:
     ros::NodeHandle nh_;
     ros::Subscriber cloud_sub;
     ros::Publisher field_pub;  // 发布加载的 PCD 点云
-    ros::Publisher final_pub;   // 发布匹配后的点云
     pcl::PointCloud<pcl::PointXYZ>::Ptr field_cloud;
-    pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
+    // pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
 
     sensor_msgs::PointCloud2 ros_field_cloud;
     pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_cloud;  // 过滤后的点云
-    Eigen::Affine3f transform; // 用于将点云调整到水平位置的变换矩阵
+    Eigen::Affine3f level_transform; // 用于将点云调整到水平位置的变换矩阵
+    bool isLevel = false;
     ros::Publisher adjusted_pub;  // 发布调整后的点云
     ros::Publisher icpadjusted_pub;
     std::thread field_pub_thread;
     pcl::PointCloud<pcl::PointXYZ>::Ptr readyICP_cloud;
     pcl::PointCloud<pcl::PointXYZ>::Ptr icp_cloud;;
+    // 提取地面点云
+    pcl::PointCloud<pcl::PointXYZ>::Ptr ground_readyICP;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr ground_field;
 
     
     Eigen::Matrix4f cumulative_transform; // 初始化累积变换矩阵
@@ -66,7 +75,7 @@ private:
     ros::Subscriber initial_pose_sub;
     Eigen::Affine3f initial_pose; // 存储初始位姿的变换
 
-    const int max_icp_iterations = 5; // 设置最大的ICP迭代次数
+    const int max_icp_iterations = 10; // 设置最大的ICP迭代次数
     const double fitness_score_threshold = 0.01; // 设置适应度得分阈值
 
     std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> cloud_buffer; // 用于存储点云的缓存
@@ -79,6 +88,8 @@ private:
     bool isINITFinish = false;
 
     ros::Publisher obstaclecloud_pub;
+
+    ClothSimulationFilter csf;
 
 };
 

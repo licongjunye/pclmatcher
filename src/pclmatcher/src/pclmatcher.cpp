@@ -5,19 +5,18 @@ PCLMatcher::PCLMatcher(ros::NodeHandle& nh) : nh_(nh) {
     cloud_sub = nh.subscribe("/livox/lidar", 10, &PCLMatcher::cloudCallback, this);
     field_pub = nh.advertise<sensor_msgs::PointCloud2>("field_cloud", 1);
     field_pub_thread = std::thread(&PCLMatcher::fieldCloudPublisher, this);
-    final_pub = nh.advertise<sensor_msgs::PointCloud2>("final_cloud", 1);
     initial_pose_sub = nh.subscribe("/initialpose", 1, &PCLMatcher::initialPoseCallback, this);
     clickpoint_sub = nh_.subscribe<geometry_msgs::PointStamped>("/clicked_point", 1, &PCLMatcher::clickedPointCallback, this);
 
     filtered_cloud.reset(new pcl::PointCloud<pcl::PointXYZ>);
 
     // 定义旋转角度和旋转轴
-    transform = Eigen::Affine3f::Identity();
+    level_transform = Eigen::Affine3f::Identity();
     float theta = - M_PI / 12; // 假设传感器倾斜的角度
-    transform.rotate(Eigen::AngleAxisf(theta, Eigen::Vector3f::UnitY()));  // Y轴旋转
+    level_transform.rotate(Eigen::AngleAxisf(theta, Eigen::Vector3f::UnitY()));  // Y轴旋转
 
     // 添加Z轴的平移
-    transform.translation() << 0.0, 0.0, -4;  // Z轴向上平移4单位
+    level_transform.translation() << 0.0, 0.0, -4.1;  // Z轴向上平移4单位
 
 
     adjusted_pub = nh.advertise<sensor_msgs::PointCloud2>("adjusted_cloud", 10);
@@ -26,6 +25,10 @@ PCLMatcher::PCLMatcher(ros::NodeHandle& nh) : nh_(nh) {
 
     cumulative_transform = Eigen::Matrix4f::Identity();
     icp_thread = std::thread(&PCLMatcher::icp_run,this);
+
+    ground_readyICP.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    ground_field.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    icp_cloud.reset(new pcl::PointCloud<pcl::PointXYZ>);
 }
 
 PCLMatcher::~PCLMatcher() {
@@ -100,7 +103,7 @@ void PCLMatcher::loadPCD(const std::string& file_path) {
     pcl::PointCloud<pcl::PointXYZ>::Ptr temp_cloud(new pcl::PointCloud<pcl::PointXYZ>);
     pcl::VoxelGrid<pcl::PointXYZ> sor;
     sor.setInputCloud(field_cloud);
-    sor.setLeafSize(0.05f, 0.05f, 0.05f);
+    sor.setLeafSize(0.1f, 0.1f, 0.1f);
     sor.filter(*temp_cloud);
 
     field_cloud.swap(temp_cloud);
@@ -119,6 +122,30 @@ void PCLMatcher::fieldCloudPublisher() {
     }
 }
 
+void PCLMatcher::icpFunction(pcl::PointCloud<pcl::PointXYZ>::Ptr& sourcecloud, pcl::PointCloud<pcl::PointXYZ>::Ptr& targetcloud, float transformationEpsilon, float distance, float euclideanFitnessEpsilon, int maximumIterations, bool useReciprocalCorrespondences, pcl::PointCloud<pcl::PointXYZ>::Ptr& aligncloud, Eigen::Matrix4f& final_transform)
+{
+    auto start_time = std::chrono::high_resolution_clock::now();
+    pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
+    icp.setInputSource(sourcecloud);
+    icp.setInputTarget(targetcloud);
+    icp.setTransformationEpsilon(transformationEpsilon);
+    icp.setMaxCorrespondenceDistance(distance);
+    icp.setEuclideanFitnessEpsilon(euclideanFitnessEpsilon);
+    icp.setMaximumIterations(maximumIterations);
+    icp.setUseReciprocalCorrespondences(useReciprocalCorrespondences);
+    icp.align(*aligncloud);
+    pcl::transformPointCloud(*sourcecloud, *sourcecloud, icp.getFinalTransformation());
+
+    // 累加变换矩阵
+    final_transform = icp.getFinalTransformation();
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    // 计算并打印 ICP 算法耗时（微秒）
+    auto duration_milliseconds = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count() / 1000;
+    std::cout << "Duration in milliseconds: " << duration_milliseconds << " ms" << std::endl;
+}
+
+
 void PCLMatcher::icp_run()
 {
     ros::Rate rate(10); // 设置发布频率，例如每秒10次
@@ -126,53 +153,25 @@ void PCLMatcher::icp_run()
     {
         if(isreadyICP)
         {
-            icp_cloud.reset(new pcl::PointCloud<pcl::PointXYZ>(*readyICP_cloud));
-            for (int i = 0; i < max_icp_iterations; ++i) 
-            {
-                // 更新源点云
-                icp.setInputSource(icp_cloud);
-                icp.setInputTarget(field_cloud);
-                
-                pcl::PointCloud<pcl::PointXYZ> TempCloud;
-                icp.align(TempCloud);
+            // 累加变换矩阵
+            Eigen::Matrix4f final_transform;
+            icpFunction(readyICP_cloud, field_cloud, 1e-10, 1, 0.001, 35, true, icp_cloud, final_transform);
+            initial_alignment_transform = final_transform * initial_alignment_transform;
 
-                if (icp.hasConverged()) {
-                    // 累积变换
-                    Eigen::Matrix4f step_transform = icp.getFinalTransformation();
-                    cumulative_transform = step_transform * cumulative_transform;
-                    
-                    // 使用新的变换更新current_source
-                    pcl::transformPointCloud(*icp_cloud, *icp_cloud, cumulative_transform);
-
-                    ROS_INFO("ICP iteration %d, score is %f", i, icp.getFitnessScore());
-
-                    if (icp.getFitnessScore() < fitness_score_threshold) {
-                        ROS_INFO("ICP fitness score is low enough, finishing ICP.");
-                        break; // 如果适应度得分低于阈值，结束迭代
-                    }
-                } else {
-                    ROS_INFO("ICP did not converge.");
-                    break; // 如果ICP没有收敛，结束迭代
-                }
-                // 使用累积变换生成最终的点云
-                sensor_msgs::PointCloud2 ros_adjusted_cloud;
-                pcl::toROSMsg(*icp_cloud, ros_adjusted_cloud);
-                ros_adjusted_cloud.header.frame_id = "livox_frame";
-                ros_adjusted_cloud.header.stamp = ros::Time::now();
-                icpadjusted_pub.publish(ros_adjusted_cloud);
-                std::cout<<"icpadjusted_pub had pub!!!!!!!!!"<<std::endl;
-            }
-            isICPFinish = true;
+            std::cout << "icp_run Initial alignment transform matrix:" << std::endl;
+            std::cout << initial_alignment_transform.matrix() << std::endl;
+            
+            isICPFinish = true;            
         }
         if(isICPFinish)
         {
             isreadyICP = false;
             sensor_msgs::PointCloud2 ros_adjusted_cloud;
-            pcl::toROSMsg(*icp_cloud, ros_adjusted_cloud);
+            pcl::toROSMsg(*readyICP_cloud, ros_adjusted_cloud);
             ros_adjusted_cloud.header.frame_id = "livox_frame";
             ros_adjusted_cloud.header.stamp = ros::Time::now();
             icpadjusted_pub.publish(ros_adjusted_cloud);
-            std::cout<<"icpadjusted_pub had pub!!!!!!!!!"<<std::endl;
+            // std::cout<<"icpadjusted_pub had pub!!!!!!!!!"<<std::endl;
         } 
         rate.sleep();
     }
@@ -190,32 +189,45 @@ void PCLMatcher::mergePointClouds() {
 
 void PCLMatcher::removeOverlappingPoints(pcl::PointCloud<pcl::PointXYZ>::Ptr& live_cloud, pcl::PointCloud<pcl::PointXYZ>::Ptr& field_cloud)
 {
-   // 对两个点云进行体素滤波
-    pcl::PointCloud<pcl::PointXYZ>::Ptr vox_source(new pcl::PointCloud<pcl::PointXYZ>());
-    pcl::PointCloud<pcl::PointXYZ>::Ptr vox_field(new pcl::PointCloud<pcl::PointXYZ>());
-
-    pcl::ApproximateVoxelGrid<pcl::PointXYZ> approximate_voxel_filter;
-    approximate_voxel_filter.setLeafSize(0.1, 0.1, 0.1);
-
-    approximate_voxel_filter.setInputCloud(live_cloud);
-    approximate_voxel_filter.filter(*vox_source);
-
-    approximate_voxel_filter.setInputCloud(field_cloud);
-    approximate_voxel_filter.filter(*vox_field);
-
     // 计算两个点云之间的差异
     pcl::SegmentDifferences<pcl::PointXYZ> segment;
-    segment.setInputCloud(vox_source);
-    segment.setTargetCloud(vox_field);
-    segment.setDistanceThreshold(0.1);  // 可根据实际情况调整
+    segment.setInputCloud(live_cloud);
+    segment.setTargetCloud(field_cloud);
+    segment.setDistanceThreshold(0.05);  // 可根据实际情况调整
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr dynamic_obstacles(new pcl::PointCloud<pcl::PointXYZ>());
     segment.segment(*dynamic_obstacles);
 
-    // dynamic_obstacles 现在包含所有的动态障碍物点
-    // 接下来你可以将这个点云发布出去
+    // 在y轴上设置滤波范围
+    pcl::PassThrough<pcl::PointXYZ> pass_y;
+    pass_y.setInputCloud(dynamic_obstacles);
+    pass_y.setFilterFieldName("y");
+    pass_y.setFilterLimits(0.2, 14.8);
+    pass_y.filter(*dynamic_obstacles);
+
+    // 在x轴上设置滤波范围
+    pcl::PassThrough<pcl::PointXYZ> pass_x;
+    pass_x.setInputCloud(dynamic_obstacles);
+    pass_x.setFilterFieldName("x");
+    pass_x.setFilterLimits(0.0, 27.5);
+    pass_x.filter(*dynamic_obstacles);
+
+    // 在z轴上设置滤波范围
+    pcl::PassThrough<pcl::PointXYZ> pass_z;
+    pass_z.setInputCloud(dynamic_obstacles);
+    pass_z.setFilterFieldName("z");
+    pass_z.setFilterLimits(0.0, 1.5);
+    pass_z.filter(*dynamic_obstacles);
+
+    // 累加点云
+    pcl::PointCloud<pcl::PointXYZ>::Ptr accumulated_obstacle_cloud(new pcl::PointCloud<pcl::PointXYZ>());
+    for (int i = 0; i < 10; ++i) 
+    {
+        *accumulated_obstacle_cloud += *dynamic_obstacles;
+    }
+    
     sensor_msgs::PointCloud2 ros_dynamic_obstacles;
-    pcl::toROSMsg(*dynamic_obstacles, ros_dynamic_obstacles);
+    pcl::toROSMsg(*accumulated_obstacle_cloud, ros_dynamic_obstacles);
     ros_dynamic_obstacles.header.frame_id = "livox_frame";
     ros_dynamic_obstacles.header.stamp = ros::Time::now();
     obstaclecloud_pub.publish(ros_dynamic_obstacles);
@@ -224,7 +236,45 @@ void PCLMatcher::removeOverlappingPoints(pcl::PointCloud<pcl::PointXYZ>::Ptr& li
 void PCLMatcher::cloudCallback(const sensor_msgs::PointCloud2ConstPtr& input_cloud) {
     pcl::PointCloud<pcl::PointXYZ>::Ptr source_cloud(new pcl::PointCloud<pcl::PointXYZ>);
     pcl::fromROSMsg(*input_cloud, *source_cloud);
-    pcl::transformPointCloud(*source_cloud, *source_cloud, transform.inverse());
+
+    if (!isLevel) {
+    // tode 计算初始的水平角度
+    //     pcl::PointCloud<pcl::PointXYZ>::Ptr accumulated_level_cloud(new pcl::PointCloud<pcl::PointXYZ>());
+    //     for (int i = 0; i < 10; ++i) {
+    //         *accumulated_level_cloud += *source_cloud;
+    //     }
+    //    // RANSAC平面拟合来找到地面平面
+    //     pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
+    //     pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
+    //     pcl::SACSegmentation<pcl::PointXYZ> seg;
+    //     seg.setOptimizeCoefficients(true);
+    //     seg.setModelType(pcl::SACMODEL_PLANE);
+    //     seg.setMethodType(pcl::SAC_RANSAC);
+    //     seg.setDistanceThreshold(0.01);
+    //     seg.setInputCloud(accumulated_level_cloud);
+    //     seg.segment(*inliers, *coefficients);
+
+    //     if (inliers->indices.size() == 0) {
+    //         std::cerr << "Could not estimate a planar model for the given dataset." << std::endl;
+    //         // 这里应该有一个返回或者异常处理
+    //     }
+
+    //     // 提取平面法线(n_x, n_y, n_z)
+    //     float nx = coefficients->values[0];
+    //     float ny = coefficients->values[1];
+    //     float nz = coefficients->values[2];
+
+    //     // 计算地面平面法线与水平面之间的夹角
+    //     float angle_to_horizontal = atan2(nz, ny);
+
+    //     // 围绕y轴旋转
+    //     level_transform.rotate(Eigen::AngleAxisf(-angle_to_horizontal, Eigen::Vector3f::UnitY()));
+
+        isLevel = true;
+    } else {
+        // 应用旋转到原始点云
+        pcl::transformPointCloud(*source_cloud, *source_cloud, level_transform.inverse());
+    }
 
     // 在x轴上设置滤波范围
     pcl::PassThrough<pcl::PointXYZ> pass_x;
@@ -246,6 +296,22 @@ void PCLMatcher::cloudCallback(const sensor_msgs::PointCloud2ConstPtr& input_clo
     pass_z.setFilterFieldName("z");
     pass_z.setFilterLimits(-10, 3);
     pass_z.filter(*source_cloud);
+
+
+    // 累加点云，仅对x坐标大于特定值（例如15米）的点进行
+    pcl::PointCloud<pcl::PointXYZ>::Ptr accumulated_cloud(new pcl::PointCloud<pcl::PointXYZ>());
+    for (auto& point : *source_cloud) {
+        if (point.x > 15.0) { // 仅对远处的点进行累加
+            for (int i = 0; i < 10; ++i) { // 已有一次，所以循环19次
+                accumulated_cloud->push_back(point);
+            }
+        } else {
+            accumulated_cloud->push_back(point); // 近处的点保持不变
+        }
+    }
+
+    // 使用累加后的点云进行后续处理
+    source_cloud.swap(accumulated_cloud);
   
 
     if(!isINITFinish)
@@ -264,11 +330,14 @@ void PCLMatcher::cloudCallback(const sensor_msgs::PointCloud2ConstPtr& input_clo
         ros_adjusted_cloud.header.stamp = ros::Time::now();
         adjusted_pub.publish(ros_adjusted_cloud);
 
-        if (cloud_buffer.size() < 5) 
+        // std::cout << "cloudCallback Initial alignment transform matrix:" << std::endl;
+        // std::cout << initial_alignment_transform.matrix() << std::endl;
+
+        if (cloud_buffer.size() <= 20) 
         {
-            std::cout<<"cloud_buffer.size()"<<cloud_buffer.size()<<std::endl;
+            // std::cout<<"cloud_buffer.size()"<<cloud_buffer.size()<<std::endl;
             cloud_buffer.push_back(source_cloud);
-            if(cloud_buffer.size() == 4)
+            if(cloud_buffer.size() == 20)
             {
                 mergePointClouds(); // 合并点云
             }
@@ -286,7 +355,7 @@ int main(int argc, char** argv) {
     ros::init(argc, argv, "pcl_matcher_node");
     ros::NodeHandle nh;
     PCLMatcher matcher(nh);
-    std::string pcd_file_path = "/home/hlc/code/RM_Radar2024/pclmatcher/file/pcd/HIT/RMUC2024.pcd";
+    std::string pcd_file_path = "/home/hlc/code/RM_Radar2024/pclmatcher/file/pcd/HIT/RMUC2024_v2.pcd";
     matcher.loadPCD(pcd_file_path);
     ros::spin();
     return 0;

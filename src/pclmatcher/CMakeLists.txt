@@ -10,6 +10,8 @@ find_package(catkin REQUIRED COMPONENTS
   geometry_msgs
 )
 
+add_subdirectory(csf)
+
 catkin_package(
  INCLUDE_DIRS include
  LIBRARIES ${PROJECT_NAME}
@@ -21,10 +23,11 @@ include_directories(
   ${catkin_INCLUDE_DIRS}
 )
 
-add_executable(${PROJECT_NAME}_node src/pclmatcher.cpp)
+add_executable(${PROJECT_NAME}_node src/pclmatcher.cpp src/mycsf.cpp)
 
 target_link_libraries(${PROJECT_NAME}_node
   ${catkin_LIBRARIES}
+  CSF
 )
 
 install(TARGETS ${PROJECT_NAME}_node

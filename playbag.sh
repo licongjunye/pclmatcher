@@ -3,18 +3,18 @@ import subprocess
 import time
 import signal
 
-def play_bag(bag_path):
-    # 通过subprocess启动 rosbag play 命令
-    process = subprocess.Popen(['rosbag', 'play', bag_path, '--loop'], preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN))
+def play_bag(bag_path, speed=2.0):
+    # 通过subprocess启动 rosbag play 命令，以指定的速度因子播放
+    process = subprocess.Popen(['rosbag', 'play', bag_path, '--loop', '-r', str(speed)], preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN))
     return process
 
 def main():
-    bag_path = '/home/hlc/code/RM_Radar2024/pclmatcher/file/video/2024-04-12-15-35-38.bag'  # 替换为你的bag文件路径
-    print("Starting to play the bag file in a loop...")
+    bag_path = '/home/hlc/RM_Radar2023/Record/bag/2024-04-12-15-35-38.bag'  # 替换为你的bag文件路径
+    print("Starting to play the bag file at 2x speed in a loop...")
 
     try:
-        # 开始循环播放
-        process = play_bag(bag_path)
+        # 开始以2倍速循环播放
+        process = play_bag(bag_path, speed=3.0)
         
         # 使脚本运行直到被外部中断
         while True:
