@@ -27,8 +27,17 @@
 #include <pcl/filters/extract_indices.h>
 #include <pcl/segmentation/sac_segmentation.h>
 #include <pcl/surface/mls.h>
+#include <pcl/console/time.h>
+#include <pcl/filters/statistical_outlier_removal.h>
+#include <pcl/kdtree/kdtree_flann.h>
+#include <pcl/filters/radius_outlier_removal.h>//半径滤波器
 #include <chrono>
+#include <unordered_map>
+#include <Eigen/Core>
+#include <visualization_msgs/Marker.h>
 #include "mycsf.h"
+#include "fasteuclideancluster.h"
+#include "euclideancluster.h"
 
 class PCLMatcher {
 public:
@@ -45,7 +54,11 @@ public:
     void removeOverlappingPoints(pcl::PointCloud<pcl::PointXYZ>::Ptr& live_cloud, pcl::PointCloud<pcl::PointXYZ>::Ptr& field_cloud);
     void icpFunction(pcl::PointCloud<pcl::PointXYZ>::Ptr& sourcecloud, pcl::PointCloud<pcl::PointXYZ>::Ptr& targetcloud, float transformationEpsilon, float distance, float euclideanFitnessEpsilon, int maximumIterations, bool useReciprocalCorrespondences, pcl::PointCloud<pcl::PointXYZ>::Ptr& aligncloud, Eigen::Matrix4f& final_transform);
 
-
+    // 定义高斯核函数
+    inline float kernel(float x)
+    {
+        return 2 * sqrt(x) * exp(-0.5 * x);
+    }
 
 private:
     ros::NodeHandle nh_;
@@ -89,9 +102,17 @@ private:
     ros::Publisher obstaclecloud_pub;
 
     ClothSimulationFilter csf;
+    std::vector<Eigen::Vector3f> m_centroids;
+    ros::Publisher marker_pub;
 
     void upsampleVoxelGrid(pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, float leaf_size, int points_per_voxel);
-
+    void fastEuclideanCluster(pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, double radius, int searchmaxsize, int minclustersize, int maxclustersize, std::vector<Eigen::Vector3f>& centroids);
+    void statisticalOutlierRemoval(pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, int num, float thresh);
+    void meanshiftclustering(pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, int bandWidth);
+    void euclideancluster(pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, double radius, int minclustersize, int maxclustersize);
+    void radiusoutlierremoval(pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, double near_radius, int near_neighbor, double far_radius, int far_neighbor);
+    void printCentroids(const std::vector<Eigen::Vector3f>& centroids);
+    void publishCentroidMarkers(const ros::Publisher& marker_pub, const std::vector<Eigen::Vector3f>& centroids);
 };
 
 #endif // PCLMATCHER_H

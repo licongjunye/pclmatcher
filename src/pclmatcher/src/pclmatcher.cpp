@@ -7,6 +7,7 @@ PCLMatcher::PCLMatcher(ros::NodeHandle& nh) : nh_(nh) {
     field_pub_thread = std::thread(&PCLMatcher::fieldCloudPublisher, this);
     initial_pose_sub = nh.subscribe("/initialpose", 1, &PCLMatcher::initialPoseCallback, this);
     clickpoint_sub = nh_.subscribe<geometry_msgs::PointStamped>("/clicked_point", 1, &PCLMatcher::clickedPointCallback, this);
+    marker_pub = nh.advertise<visualization_msgs::Marker>("visualization_marker", 10);
 
     filtered_cloud.reset(new pcl::PointCloud<pcl::PointXYZ>);
 
@@ -177,6 +178,38 @@ void PCLMatcher::icp_run()
     }
 }
 
+void PCLMatcher::publishCentroidMarkers(const ros::Publisher& marker_pub, const std::vector<Eigen::Vector3f>& centroids)
+{
+    visualization_msgs::Marker points;
+    points.header.frame_id = "livox_frame";
+    points.header.stamp = ros::Time::now();
+    points.ns = "centroids";
+    points.action = visualization_msgs::Marker::ADD;
+    points.pose.orientation.w = 1.0;
+    points.id = 0;
+    points.type = visualization_msgs::Marker::POINTS;
+
+    // 设置点标记的尺寸
+    points.scale.x = 0.2; // 点的宽度
+    points.scale.y = 0.2; // 点的高度
+
+    // 设置点的颜色为绿色
+    points.color.g = 1.0f;
+    points.color.a = 1.0; // 不透明度
+
+    // 循环添加点
+    for (const Eigen::Vector3f& centroid : centroids) {
+        geometry_msgs::Point p;
+        p.x = centroid[0];
+        p.y = centroid[1];
+        p.z = centroid[2];
+        points.points.push_back(p);
+    }
+
+    // 发布Marker
+    marker_pub.publish(points);
+}
+
 void PCLMatcher::upsampleVoxelGrid(pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, float leaf_size, int points_per_voxel) 
 {
     auto start_time = std::chrono::high_resolution_clock::now();
@@ -229,6 +262,9 @@ void PCLMatcher::mergePointClouds(std::vector<pcl::PointCloud<pcl::PointXYZ>::Pt
     pl = merged_cloud;
 }
 
+
+
+
 void PCLMatcher::removeOverlappingPoints(pcl::PointCloud<pcl::PointXYZ>::Ptr& live_cloud, pcl::PointCloud<pcl::PointXYZ>::Ptr& field_cloud)
 {
     // 计算两个点云之间的差异
@@ -261,14 +297,288 @@ void PCLMatcher::removeOverlappingPoints(pcl::PointCloud<pcl::PointXYZ>::Ptr& li
     pass_z.setFilterLimits(0.0, 1.4);
     pass_z.filter(*dynamic_obstacles);
 
+    // statisticalOutlierRemoval(dynamic_obstacles, 10, 1);
+    // meanshiftclustering(dynamic_obstacles, 12);
+    //快速欧氏聚类
+    // euclideancluster(dynamic_obstacles, 0.5, 10, 50000);
+    radiusoutlierremoval(dynamic_obstacles, 0.5, 2, 0.1, 10);
+    fastEuclideanCluster(dynamic_obstacles, 0.5, 50, 2, 50000, m_centroids);
+
     // 累加点云
-    // upsampleVoxelGrid(dynamic_obstacles, 0.1, 1000); // 每个体素中生成10个点
+    upsampleVoxelGrid(dynamic_obstacles, 0.1, 500); // 每个体素中生成10个点
     
     sensor_msgs::PointCloud2 ros_dynamic_obstacles;
     pcl::toROSMsg(*dynamic_obstacles, ros_dynamic_obstacles);
     ros_dynamic_obstacles.header.frame_id = "livox_frame";
     ros_dynamic_obstacles.header.stamp = ros::Time::now();
     obstaclecloud_pub.publish(ros_dynamic_obstacles);
+    printCentroids(m_centroids);
+    publishCentroidMarkers(marker_pub, m_centroids);
+}
+
+
+void PCLMatcher::printCentroids(const std::vector<Eigen::Vector3f>& centroids) {
+    if (centroids.empty()) {  // 检查向量是否为空
+        std::cout << "No centroids available to display." << std::endl;
+        return;  // 如果为空，打印消息并退出函数
+    }
+    int clusterIndex = 1;
+    for (const Eigen::Vector3f& centroid : centroids) {
+        std::cout << "Cluster " << clusterIndex << " centroid: X=" << centroid[0]
+                  << ", Y=" << centroid[1] << ", Z=" << centroid[2] <<'\n\n\n'<< std::endl;
+        clusterIndex++;
+    }
+}
+
+void PCLMatcher::radiusoutlierremoval(pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, double near_radius, int near_neighbor, double far_radius, int far_neighbor)
+{
+    // 检查输入点云是否为空
+    if (!cloud || cloud->empty()) {
+        std::cerr << "radiusoutlierremoval Input cloud is empty or null!" << std::endl;
+        return; // 如果点云为空，则提前返回
+    }
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_radius(new pcl::PointCloud<pcl::PointXYZ>);
+
+     // 分割点云为近处和远处两部分
+    pcl::PointCloud<pcl::PointXYZ>::Ptr near_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr far_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_near_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_far_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+
+    for (const auto& point : *cloud) {
+        if (point.x >= 13.0) {
+            far_cloud->push_back(point);
+        } else {
+            near_cloud->push_back(point);
+        }
+    }
+
+    // if (near_cloud->empty()) 
+    // {
+    //     std::cout<<"near_cloud->empty()"<<std::endl;
+    // }
+    // if (far_cloud->empty()) 
+    // {
+    //     std::cout<<"near_cloud->empty()"<<std::endl;
+    // }
+
+    // 应用半径滤波 - 近处点云
+    if (!near_cloud->empty()) {
+        pcl::RadiusOutlierRemoval<pcl::PointXYZ> near_ror;
+        near_ror.setInputCloud(near_cloud);
+        near_ror.setRadiusSearch(near_radius);  // 例如0.05m
+        near_ror.setMinNeighborsInRadius(near_neighbor); // 例如2
+        near_ror.filter(*filtered_near_cloud);
+    }
+
+    // 应用半径滤波 - 远处点云
+    if (!far_cloud->empty()) {
+        pcl::RadiusOutlierRemoval<pcl::PointXYZ> far_ror;
+        far_ror.setInputCloud(far_cloud);
+        far_ror.setRadiusSearch(far_radius);  // 例如0.2m
+        far_ror.setMinNeighborsInRadius(far_neighbor); // 例如5
+        far_ror.filter(*filtered_far_cloud);
+    }
+    
+
+    *cloud_radius = *filtered_near_cloud + *filtered_far_cloud;
+    cloud.swap(cloud_radius);
+}
+
+
+void PCLMatcher::euclideancluster(pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, double radius, int minclustersize, int maxclustersize)
+{
+	pcl::console::TicToc time;
+	// ---------------------------欧式聚类-------------------------------
+	std::vector<std::vector<int>>label;
+	EuclideanCluster eu;
+	eu.setInputCloud(cloud);      // 输入点云
+	eu.setClusterTolerance(radius);  // 搜索半径
+	eu.setMinClusterSize(minclustersize);   // 聚类最小点数
+	eu.setMaxClusterSize(maxclustersize);   // 聚类最大点数
+	eu.extract(label);
+	// -----------------------聚类结果分类保存---------------------------
+	pcl::PointCloud<pcl::PointXYZ>::Ptr clusterResult(new pcl::PointCloud<pcl::PointXYZ>);
+	std::vector<int> idx;
+	for (int i = 0; i < label.size(); ++i)
+	{
+		pcl::PointCloud<pcl::PointXYZ>::Ptr clusterTemp(new pcl::PointCloud<pcl::PointXYZ>);
+		pcl::copyPointCloud(*cloud, label[i], *clusterTemp);
+		// eu.clusterColor(clusterTemp);
+		*clusterResult += *clusterTemp;
+		// 聚类结果分类保存
+	}
+	std::cout << "欧式聚类用时：" << time.toc() << " ms" << std::endl;
+	// pcl::io::savePCDFileBinary("EUclusterResult.pcd", *clusterResult);
+    cloud.swap(clusterResult);
+}
+
+
+void PCLMatcher::meanshiftclustering(pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, int bandWidth)
+{
+	// --------------------------建立kd-tree索引------------------------
+	pcl::KdTreeFLANN<pcl::PointXYZ>tree;
+	tree.setInputCloud(cloud);
+	std::vector<int>nn_indices;
+	std::vector<float>nn_dists;
+	// ---------------------------MeanShift聚类--------------------------
+	// 1、确定随机初始点
+	int num = cloud->size();
+	srand((int)time(0));
+	int pp = rand() % num;
+	Eigen::Vector3f centroid = cloud->points[pp].getVector3fMap();
+	// // 2、参数设置
+	// float  bandWidth = 7;
+	// 3、定义必要的容器
+	std::vector<int> labels(cloud->points.size(), 0); // initalize all point label as 0
+	int segLab = 1; // Segment label
+	// 4、对每个点执行MeanShift聚类
+	for (int i = 0; i < cloud->size(); ++i)
+	{
+		if (labels[i] != 0)
+		{
+			continue;
+		}
+		if (tree.radiusSearch(cloud->points[i], bandWidth, nn_indices, nn_dists) <= 0)
+		{
+			continue;
+		}
+		// 寻找聚类中心
+		bool converged = false;
+		// 获取当前点的坐标
+		const Eigen::Vector3f& point = cloud->points[i].getVector3fMap();
+
+		while (!converged)
+		{
+			// 计算当前中心点周围所有点的加权平均值
+			Eigen::Vector3f new_centroid = Eigen::Vector3f::Zero(point.size());
+			float total_weight = 0.0f;
+			for (size_t j = 0; j < nn_indices.size(); ++j)
+			{
+				const int idx_j = nn_indices[j];
+				const Eigen::Vector3f& point_j = cloud->points[idx_j].getVector3fMap();
+				const float dist = nn_dists[j];
+				const float weight = kernel(dist / bandWidth);
+				new_centroid += weight * point_j;
+				total_weight += weight;
+			}
+			new_centroid /= total_weight;
+			float convergence_threshold = 0.1; // 收敛阈值
+			// 判断是否收敛
+			if ((new_centroid - centroid).norm() < convergence_threshold)
+			{
+				converged = true;
+                std::cout<<"meanshiftclustering converged = true"<<std::endl;
+			}
+			else
+			{
+				centroid = new_centroid;
+			}
+		}
+		for (size_t j = 0; j < nn_indices.size(); ++j)
+		{
+			labels[nn_indices[j]] = segLab;
+		}
+		segLab++;
+	}
+
+	// 根据分类标签对点云进行分类
+	std::vector<pcl::PointIndices> clusterIndices; // 点云团索引
+	std::unordered_map<int, int> map;
+	int index = 1;
+	for (int i = 0; i < cloud->points.size(); i++)
+	{
+		int label = labels[i];
+
+		if (!map[label])
+		{
+			map[label] = index;
+			clusterIndices.push_back(pcl::PointIndices());
+			index++;
+		}
+		clusterIndices[map[label] - 1].indices.push_back(i);
+	}
+	// ---------------------------聚类结果分类保存--------------------------------
+	int begin = 1;
+	pcl::PointCloud<pcl::PointXYZ>::Ptr meanShiftCluster(new pcl::PointCloud<pcl::PointXYZ>);
+
+	for (auto it = clusterIndices.begin(); it != clusterIndices.end(); ++it)
+	{
+		// 获取每一个聚类点云团的点
+		pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_ms(new pcl::PointCloud<pcl::PointXYZ>);
+		// 同一点云团赋上同一种颜色
+		// uint8_t R = rand() % (256) + 0;
+		// uint8_t G = rand() % (256) + 0;
+		// uint8_t B = rand() % (256) + 0;
+
+		for (auto pit = it->indices.begin(); pit != it->indices.end(); ++pit)
+		{
+			pcl::PointXYZ point_db;
+			point_db.x = cloud->points[*pit].x;
+			point_db.y = cloud->points[*pit].y;
+			point_db.z = cloud->points[*pit].z;
+			// point_db.r = R;
+			// point_db.g = G;
+			// point_db.b = B;
+			cloud_ms->points.push_back(point_db);
+		}
+		// 聚类结果分类保存
+		// stringstream ss;
+		// ss << "ms_cluster_" << begin << ".pcd";
+		// pcl::PCDWriter writer;
+		// writer.write<pcl::PointXYZRGB>(ss.str(), *cloud_ms, true);
+		// begin++;
+
+		*meanShiftCluster += *cloud_ms;
+	}
+	// -------------------------------聚类结果可视化----------------------------------
+	cloud.swap(meanShiftCluster);
+}
+
+void PCLMatcher::fastEuclideanCluster(pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, double radius, int searchmaxsize, int minclustersize, int maxclustersize, std::vector<Eigen::Vector3f>& centroids)
+{
+    pcl::console::TicToc time;
+    time.tic();
+	// ---------------------------改进快速欧式聚类-------------------------------
+	std::vector<std::vector<int>>label;
+	FastEuclideanCluster fec;
+	fec.setInputCloud(cloud);      // 输入点云
+	fec.setClusterTolerance(radius);  // 搜索半径
+	fec.setSearchMaxSize(searchmaxsize);      // 邻域最大点数
+	fec.setMinClusterSize(minclustersize);   // 聚类最小点数
+	fec.setMaxClusterSize(maxclustersize);   // 聚类最大点数
+	fec.extract(label);
+	// ---------------------------聚类结果分类保存------------------------------
+    centroids.clear(); // 清空centroids向量以防含有旧数据
+	pcl::PointCloud<pcl::PointXYZ>::Ptr clusterResult(new pcl::PointCloud<pcl::PointXYZ>);
+	for (int i = 0; i < label.size(); ++i)
+	{
+		pcl::PointCloud<pcl::PointXYZ>::Ptr clusterTemp(new pcl::PointCloud<pcl::PointXYZ>);
+		pcl::copyPointCloud(*cloud, label[i], *clusterTemp);
+		*clusterResult += *clusterTemp;
+
+        // 计算每个聚类的质心
+        Eigen::Vector4f centroid;
+        pcl::compute3DCentroid(*clusterTemp, centroid);
+
+        // 只将X, Y, Z坐标存入centroids向量
+        centroids.push_back(Eigen::Vector3f(centroid[0], centroid[1], centroid[2]));
+
+	}
+	std::cout << "快速欧式聚类用时：" << time.toc() << " ms" << std::endl;
+	cloud.swap(clusterResult);
+}
+
+void PCLMatcher::statisticalOutlierRemoval(pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, int num, float thresh)
+{
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_filtered(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::StatisticalOutlierRemoval<pcl::PointXYZ> sor;
+    sor.setInputCloud(cloud);    //输入点云
+    sor.setMeanK(num);            //设置领域点的个数
+    sor.setStddevMulThresh(thresh); //设置离群点的阈值
+    sor.filter(*cloud_filtered); //滤波后的结果
+    cloud.swap(cloud_filtered);
 }
 
 void PCLMatcher::cloudCallback(const sensor_msgs::PointCloud2ConstPtr& input_cloud) {

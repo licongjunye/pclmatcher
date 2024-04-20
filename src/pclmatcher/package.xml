@@ -10,6 +10,7 @@
   <depend>roscpp</depend>
   <depend>sensor_msgs</depend>
   <depend>pcl_ros</depend>
+  <depend>visualization_msgs</depend>
   <build_depend>pcl_conversions</build_depend>
   <build_depend>geometry_msgs</build_depend>
   <build_export_depend>pcl_conversions</build_export_depend>

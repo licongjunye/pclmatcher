@@ -23,7 +23,14 @@ include_directories(
   ${catkin_INCLUDE_DIRS}
 )
 
-add_executable(${PROJECT_NAME}_node src/pclmatcher.cpp src/mycsf.cpp)
+set(SRC
+    src/pclmatcher.cpp 
+    src/mycsf.cpp
+    src/fasteuclideancluster.cpp
+    src/euclideancluster.cpp
+)
+
+add_executable(${PROJECT_NAME}_node ${SRC})
 
 target_link_libraries(${PROJECT_NAME}_node
   ${catkin_LIBRARIES}

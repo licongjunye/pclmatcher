@@ -175,7 +175,7 @@ Visualization Manager:
       Class: rviz/PointCloud2
       Color: 138; 226; 52
       Color Transformer: FlatColor
-      Decay Time: 0.10000000149011612
+      Decay Time: 0.20000000298023224
       Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
@@ -184,7 +184,7 @@ Visualization Manager:
       Position Transformer: XYZ
       Queue Size: 10
       Selectable: true
-      Size (Pixels): 1
+      Size (Pixels): 5
       Size (m): 0.10000000149011612
       Style: Points
       Topic: /obstacle_cloud
@@ -220,7 +220,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 17.3093204498291
+      Distance: 23.43183135986328
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -228,17 +228,17 @@ Visualization Manager:
         Value: false
       Field of View: 0.7853981852531433
       Focal Point:
-        X: 17.331449508666992
-        Y: -7.559982776641846
-        Z: -2.9786853790283203
+        X: 17.097583770751953
+        Y: -10.744887351989746
+        Z: -2.6610238552093506
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.5697963237762451
+      Pitch: 1.5447962284088135
       Target Frame: <Fixed Frame>
-      Yaw: 3.125396966934204
+      Yaw: 3.0503990650177
     Saved: ~
 Window Geometry:
   Displays:
